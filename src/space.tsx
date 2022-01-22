@@ -82,12 +82,33 @@ const temperatureFragmentSource = `#version 300 es
   uniform sampler2D uTexture;
   uniform int screenWidth;
   uniform int screenHeight;
+
+  uniform int numAddHeatEvents;
+  uniform AddHeatEvents {
+    int eventx[5];
+    int eventy[5];
+    int eventr[5];
+  };
   
   out vec4 FragColor;
 
   void main() {
     int x = int(gl_FragCoord.x);
     int y = int(gl_FragCoord.y);
+
+    for (int event = 0; event < numAddHeatEvents; event++) {
+      if (x < eventx[event] - eventr[event] || x > eventx[event] + eventr[event] ||
+          y < eventy[event] - eventr[event] || y > eventy[event] + eventr[event]) {
+        continue;
+      }
+
+      int distance2 = (x - eventx[event]) * (x - eventx[event]) + (y - eventy[event]) * (y - eventy[event]);
+      if (distance2 <= eventr[event] * eventr[event]) {
+        FragColor = vec4(1, 0, 0, 1);
+        return;
+      }
+    }
+
     float currentValue = texelFetch(uTexture, ivec2(x, y), 0).r;
     float sum = 0.0;
 
@@ -111,6 +132,8 @@ const temperatureFragmentSource = `#version 300 es
 export default class Space {
   screenWidth: number;
   screenHeight: number;
+  simulationWidth: number;
+  simulationHeight: number;
 
   screenTextureVAO: WebGLVertexArrayObject;
   screenTextureShader: Shader;
@@ -120,15 +143,22 @@ export default class Space {
 
   temperatureVAO: WebGLVertexArrayObject;
   temperatureShader: Shader;
+  temperatureUBO: WebGLBuffer;
+  UBOVariableOffsets: { x: number; y: number; r: number };
+
+  addHeatEvents: { x: number; y: number; r: number }[] = [];
 
   constructor(
     gl: WebGL2RenderingContext,
     screenWidth: number,
-    screenHeight: number
+    screenHeight: number,
+    simulationWidth: number,
+    simulationHeight: number
   ) {
     this.screenWidth = screenWidth;
     this.screenHeight = screenHeight;
-    gl.viewport(0, 0, screenWidth, screenHeight);
+    this.simulationWidth = simulationWidth;
+    this.simulationHeight = simulationHeight;
 
     gl.getExtension('EXT_color_buffer_float');
 
@@ -141,18 +171,19 @@ export default class Space {
       screenTextureFragmentSource
     );
 
-    const data = new Float32Array(screenWidth * screenHeight);
-    for (let x = 0; x < screenWidth; x++) {
-      for (let y = 0; y < screenHeight; y++) {
-        if (
-          Math.pow(x - screenWidth / 2, 2) +
-            Math.pow(y - screenHeight / 2, 2) <=
-          50 * 50
-        ) {
-          data[x + y * screenWidth] = 1;
-        }
-      }
-    }
+    const data = new Float32Array(simulationWidth * simulationHeight);
+
+    // for (let x = 0; x < simulationWidth; x++) {
+    //   for (let y = 0; y < simulationHeight; y++) {
+    //     if (
+    //       Math.pow(x - simulationWidth / 2, 2) +
+    //         Math.pow(y - simulationHeight / 2, 2) <=
+    //       50 * 50
+    //     ) {
+    //       data[x + y * simulationWidth] = 1;
+    //     }
+    //   }
+    // }
 
     this.currentScreenTexture = gl.createTexture()!;
     gl.activeTexture(gl.TEXTURE0);
@@ -161,8 +192,8 @@ export default class Space {
       gl.TEXTURE_2D,
       0,
       gl.R32F,
-      screenWidth,
-      screenHeight,
+      simulationWidth,
+      simulationHeight,
       0,
       gl.RED,
       gl.FLOAT,
@@ -182,8 +213,8 @@ export default class Space {
       gl.TEXTURE_2D,
       0,
       gl.R32F,
-      screenWidth,
-      screenHeight,
+      simulationWidth,
+      simulationHeight,
       0,
       gl.RED,
       gl.FLOAT,
@@ -205,7 +236,7 @@ export default class Space {
       0
     );
 
-    /********************* Render temperature to screen texture **********************/
+    /********************* Temperature compute shader **********************/
     this.temperatureVAO = gl.createVertexArray()!;
 
     this.temperatureShader = new Shader(
@@ -213,11 +244,57 @@ export default class Space {
       temperatureVertexSource,
       temperatureFragmentSource
     );
+
+    // Events uniform buffer
+    const blockIndex = gl.getUniformBlockIndex(
+      this.temperatureShader.program,
+      'AddHeatEvents'
+    );
+    const blockSize = gl.getActiveUniformBlockParameter(
+      this.temperatureShader.program,
+      blockIndex,
+      gl.UNIFORM_BLOCK_DATA_SIZE
+    );
+
+    this.temperatureUBO = gl.createBuffer()!;
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.temperatureUBO);
+    gl.bufferData(gl.UNIFORM_BUFFER, blockSize, gl.DYNAMIC_DRAW);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, this.temperatureUBO);
+
+    const uboVariableIndices = Array.from(
+      gl.getUniformIndices(this.temperatureShader.program, [
+        'eventx',
+        'eventy',
+        'eventr',
+      ])!
+    );
+
+    const uboVariableOffsets: number[] = Array.from(
+      gl.getActiveUniforms(
+        this.temperatureShader.program,
+        uboVariableIndices,
+        gl.UNIFORM_OFFSET
+      )!
+    );
+
+    this.UBOVariableOffsets = {
+      x: uboVariableOffsets[0],
+      y: uboVariableOffsets[1],
+      r: uboVariableOffsets[2],
+    };
+
+    const index = gl.getUniformBlockIndex(
+      this.temperatureShader.program,
+      'AddHeatEvents'
+    );
+    gl.uniformBlockBinding(this.temperatureShader.program, index, 0);
   }
 
-  step() {}
+  addHeat(x: number, y: number, r: number) {
+    this.addHeatEvents.push({ x, y, r });
+  }
 
-  draw(gl: WebGL2RenderingContext) {
+  step(gl: WebGL2RenderingContext) {
     /********************* Use current texture to write to next texture **********************/
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.currentScreenTexture);
@@ -230,12 +307,34 @@ export default class Space {
     );
     gl.uniform1i(
       gl.getUniformLocation(this.temperatureShader.program, 'screenWidth'),
-      this.screenWidth
+      this.simulationWidth
     );
     gl.uniform1i(
       gl.getUniformLocation(this.temperatureShader.program, 'screenHeight'),
-      this.screenHeight
+      this.simulationHeight
     );
+    gl.uniform1i(
+      gl.getUniformLocation(this.temperatureShader.program, 'numAddHeatEvents'),
+      this.addHeatEvents.length
+    );
+
+    const xData = new Int32Array(20);
+    const yData = new Int32Array(20);
+    const rData = new Int32Array(20);
+
+    for (let i = 0; i < Math.min(5, this.addHeatEvents.length); i++) {
+      xData[4 * i] = this.addHeatEvents[i].x;
+      yData[4 * i] = this.addHeatEvents[i].y;
+      rData[4 * i] = this.addHeatEvents[i].r;
+    }
+
+    this.addHeatEvents = [];
+
+    gl.bindBuffer(gl.UNIFORM_BUFFER, this.temperatureUBO);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, this.UBOVariableOffsets.x, xData, 0);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, this.UBOVariableOffsets.y, yData, 0);
+    gl.bufferSubData(gl.UNIFORM_BUFFER, this.UBOVariableOffsets.r, rData, 0);
+    gl.viewport(0, 0, this.simulationWidth, this.simulationHeight);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     /********************* Swap current and next textures **********************/
@@ -245,8 +344,8 @@ export default class Space {
       gl.R32F,
       0,
       0,
-      this.screenWidth,
-      this.screenHeight,
+      this.simulationWidth,
+      this.simulationHeight,
       0
     );
 
@@ -264,11 +363,11 @@ export default class Space {
     //   gl.COLOR_BUFFER_BIT,
     //   gl.NEAREST
     // );
+  }
 
+  draw(gl: WebGL2RenderingContext) {
     /********************* Draw current texture to screen **********************/
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    // gl.bindTexture(gl.TEXTURE_2D, this.currentScreenTexture);
-    // gl.activeTexture(gl.TEXTURE0);
 
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -280,8 +379,7 @@ export default class Space {
       1
     );
 
+    gl.viewport(0, 0, this.screenWidth, this.screenHeight);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
-
-  drawScreenTexture(gl: WebGL2RenderingContext) {}
 }
