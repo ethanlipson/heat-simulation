@@ -1,6 +1,6 @@
-# Getting Started with Create React App
+# 2D Heat Simulation
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app). Try it out on [my website](https://ethanlipson.com/heatsimulation)!
+This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app). Try it out on [my website](https://ethanlipson.com/heatsimulation)! Click/touch and drag to add heat.
 
 ## Available Scripts
 
